@@ -1,0 +1,68 @@
+# Publishes ghcr.io/<owner>/browsers:<target>-<version>, version = versions.env:
+#   chrome-pr<patchright>, chromium-pw<playwright>, firefox-pw<playwright>, camoufox-cf<camoufox-js>,
+#   all-pw<playwright>-pr<patchright>-cf<camoufox-js>; plus <target>-latest.
+# A tag that already exists is skipped, unless the workflow is run by hand.
+name: publish
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [chrome, chromium, firefox, camoufox, all]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag
+        id: v
+        run: |
+          . ./versions.env
+          case "${{ matrix.target }}" in
+            chrome)   v="pr$PATCHRIGHT_VERSION" ;;
+            chromium|firefox) v="pw$PLAYWRIGHT_VERSION" ;;
+            camoufox) v="cf$CAMOUFOX_JS_VERSION" ;;
+            all)      v="pw$PLAYWRIGHT_VERSION-pr$PATCHRIGHT_VERSION-cf$CAMOUFOX_JS_VERSION" ;;
+          esac
+          echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/browsers" >> "$GITHUB_OUTPUT"
+          echo "tag=${{ matrix.target }}-$v" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Already published?
+        id: exists
+        run: |
+          if docker manifest inspect ${{ steps.v.outputs.image }}:${{ steps.v.outputs.tag }} >/dev/null 2>&1 \
+             && [ "${{ github.event_name }}" != "workflow_dispatch" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"; echo "Tag exists, nothing to build."
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.exists.outputs.skip != 'true'
+
+      - uses: docker/build-push-action@v6
+        if: steps.exists.outputs.skip != 'true'
+        with:
+          context: .
+          target: ${{ matrix.target }}
+          platforms: linux/amd64
+          push: true
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.description=${{ matrix.target }} browser image (Playwright / Patchright / Camoufox), Xvfb, tini
+          tags: |
+            ${{ steps.v.outputs.image }}:${{ steps.v.outputs.tag }}
+            ${{ steps.v.outputs.image }}:${{ matrix.target }}-latest
